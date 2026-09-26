@@ -84,6 +84,8 @@ type rule struct {
 type Plugin struct {
 	opts  Options
 	rules []rule
+	// host answers a gone page with the site's own not-found page.
+	host collage.Host
 }
 
 // New returns a plugin with opts as its starting point, which the application's
@@ -91,7 +93,7 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.1.0" }
+func (p *Plugin) Version() string                { return "0.1.1" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // Init reads the rules, refuses any that are wrong, warns of any that hide a page,
@@ -108,6 +110,7 @@ func (p *Plugin) Init(ctx context.Context, host collage.Host) error {
 		return err
 	}
 	p.rules = rules
+	p.host = host
 	p.warnShadowedPages(ctx, host)
 
 	if !p.opts.NoRedirectsFile {
@@ -371,7 +374,9 @@ func (p *Plugin) middleware(next http.Handler) http.Handler {
 			return
 		}
 		if rule.Status == http.StatusGone {
-			http.Error(w, "410 gone", http.StatusGone)
+			// The site's own not-found page, with the status saying the page is not
+			// coming back: a reader sees the site, a crawler drops the URL.
+			p.host.ServeStatus(w, r, http.StatusGone)
 			return
 		}
 		http.Redirect(w, r, withQuery(rule.target(splat), r.URL.RawQuery), rule.Status)

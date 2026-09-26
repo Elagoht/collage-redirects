@@ -13,7 +13,7 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.23.0 or later.
+Requires collage v0.24.0 or later.
 
 ## The file
 
@@ -35,7 +35,8 @@ One rule a line: the old path, where it went, and a status.
 - **To** is a path on the site or an `http`/`https` URL, and may carry a query and
   a fragment of its own. `-` is a page that is gone.
 - **Status** is `301` when left out, or `302`, `307`, `308`, or `410` for a page
-  that is gone with no replacement, which is answered `410 Gone`.
+  that is gone with no replacement, which is answered `410 Gone` with the site's
+  own not-found page.
 - `#` starts a comment, on a line of its own or after a rule.
 
 The first rule that matches wins, as on Netlify and Cloudflare Pages. The query
@@ -115,8 +116,6 @@ replaces the list given in Go, as decoding JSON into a slice does.
 
 - The rules are read once, when the application starts; a change to the file needs
   a restart.
-- A gone page is answered with a plain `410 gone`, not the site's own error page:
-  a plugin has no way to render a page for a request the router never saw.
 - Only the URLs `Host.PageURLs` knows are checked for a rule hiding a page. A
   pattern without `WithStaticParams`, and every document, is not.
 - A loop through another host — `/a` to `https://example.com/b`, which is this
@@ -125,3 +124,11 @@ replaces the list given in Go, as decoding JSON into a slice does.
   lets you see what a static host would read. Netlify and Cloudflare Pages differ in
   details the plugin does not paper over: Cloudflare caps the number of rules, and
   each host has its own rules for query strings.
+
+## Changes
+
+### v0.1.1
+
+- A gone page is answered with the site's own not-found page, status 410, through
+  collage v0.24.0's `Host.ServeStatus`, rather than a line of text.
+- Requires collage v0.24.0.

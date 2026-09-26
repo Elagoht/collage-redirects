@@ -84,8 +84,10 @@ func TestRedirects(t *testing.T) {
 		{http.MethodGet, "/blog", 301, "/posts/"},
 		{http.MethodGet, "/blog/", 301, "/posts/"},
 		{http.MethodGet, "/docs/a/b", 307, "https://docs.example/a/b"},
-		// A splat cannot turn a path into another host.
-		{http.MethodGet, "/blog//evil.example/x", 301, "/posts/evil.example/x"},
+		// collage cleans a doubled slash before the rules see it, so a splat
+		// never begins with one there; the rule's own guard stays behind that.
+		{http.MethodGet, "/blog//evil.example/x", 301, "/blog/evil.example/x"},
+		{http.MethodGet, "/blog/evil.example/x", 301, "/posts/evil.example/x"},
 	} {
 		rec := get(h, c.method, c.from)
 		if rec.Code != c.status || rec.Header().Get("Location") != c.to {
@@ -103,6 +105,35 @@ func TestRedirects(t *testing.T) {
 	// A prefix is a path segment, not a string: /blog/* does not take /blogger.
 	if rec := get(h, http.MethodGet, "/blogger"); rec.Code != http.StatusNotFound {
 		t.Errorf("/blogger = %d %q, want no redirect", rec.Code, rec.Header().Get("Location"))
+	}
+}
+
+// A gone page is answered with the site's own not-found page, status 410, not a
+// line of text.
+func TestGoneServesNotFoundPage(t *testing.T) {
+	cfg := &collage.Config{
+		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{
+			"t/p.html":       {Data: []byte(`<p>page</p>`)},
+			"t/missing.html": {Data: []byte(`<h1>Nothing here</h1>`)},
+		}, Root: "t"},
+		Plugins: []collage.Plugin{redirects.New(withFile(file))},
+		Logger:  slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
+	}
+	a, err := collage.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RegisterNotFoundPage(collage.NewPage("missing").WithContent(collage.NewFragment("missing", "missing.html").Build()).Build()); err != nil {
+		t.Fatal(err)
+	}
+	rec := get(a.Handler(), http.MethodGet, "/old-product")
+	if rec.Code != http.StatusGone || !strings.Contains(rec.Body.String(), "<h1>Nothing here</h1>") {
+		t.Errorf("/old-product = %d %q, want 410 with the not-found page", rec.Code, rec.Body.String())
+	}
+	// A path no rule names gets the same page, at 404.
+	if rec := get(a.Handler(), http.MethodGet, "/nowhere"); rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "Nothing here") {
+		t.Errorf("/nowhere = %d %q", rec.Code, rec.Body.String())
 	}
 }
 
