@@ -1,0 +1,41 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Elagoht/collage-snippets-highlighter/main/schemas/collage-plugin-manifest.schema.json",
+  "name": "elagoht/redirects",
+  "description": "A collage plugin for redirects kept in a file rather than in code: what a site migration leaves behind, hundreds of old addresses and where each one went.",
+  "repository": "https://github.com/Elagoht/collage-redirects",
+  "config": {
+    "type": "object",
+    "description": "A collage plugin for redirects kept in a file rather than in code: what a site migration leaves behind, hundreds of old addresses and where each one went.",
+    "properties": {
+      "file": {
+        "type": "string",
+        "description": "File is the redirects file's name. Default \"redirects.txt\"."
+      },
+      "noRedirectsFile": {
+        "type": "boolean",
+        "description": "NoRedirectsFile leaves out /_redirects, the copy of the rules a static host reads."
+      },
+      "rules": {
+        "type": "array",
+        "description": "Rules are redirects given in Go or configuration, checked after the file's.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string",
+              "description": "From is the old path: \"/about-us\", or a prefix, \"/blog/*\", matching \"/blog\", \"/blog/\" and everything under it."
+            },
+            "status": {
+              "type": "integer",
+              "description": "Status is 301, the default, 302, 307, 308, or 410 for a page that is gone and has no replacement."
+            },
+            "to": {
+              "type": "string",
+              "description": "To is where it went: a path on the site or an absolute URL. For a prefix, \":splat\" in it is what the \"*\" matched. \"-\" for a rule that is gone."
+            }
+          }
+        }
+      }
+    }
+  }
+}

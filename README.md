@@ -127,6 +127,12 @@ replaces the list given in Go, as decoding JSON into a slice does.
 
 ## Changes
 
+### v0.1.2
+
+- `collage.json`: the plugin described to editors — its template functions,
+  snippets and configuration schema — for the Collage Snippets & Highlighter
+  extension and any tool reading it.
+
 ### v0.1.1
 
 - A gone page is answered with the site's own not-found page, status 410, through
