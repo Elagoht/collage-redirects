@@ -33,9 +33,11 @@
               "type": "string",
               "description": "To is where it went: a path on the site or an absolute URL. For a prefix, \":splat\" in it is what the \"*\" matched. \"-\" for a rule that is gone."
             }
-          }
+          },
+          "additionalProperties": false
         }
       }
-    }
+    },
+    "additionalProperties": false
   }
 }
