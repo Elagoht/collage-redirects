@@ -127,6 +127,10 @@ replaces the list given in Go, as decoding JSON into a slice does.
 
 ## Changes
 
+### v0.1.6
+
+- Retracts v0.1.4, tagged by mistake on the previous release's code. Use v0.1.5 or later. Nothing else changes.
+
 ### v0.1.5
 
 - Requires collage v0.50.0. Plugin configuration is read with `collage.PluginConfig`, since `host.Config` is gone. Nothing else changes.
