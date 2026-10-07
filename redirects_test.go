@@ -374,8 +374,14 @@ func TestControlCharacters(t *testing.T) {
 			t.Errorf("%s: Start = %v, want ErrInvalidRule for a control character", raw, err)
 		}
 	}
-	if err := app(t, withFile("/a\x01 /b\n"), nil, nil).Start(); !errors.Is(err, redirects.ErrInvalidRule) {
+	if err := app(t, withFile("/a\x01 /b\n"), nil, nil).Start(); !errors.Is(err, redirects.ErrInvalidRule) || !strings.Contains(err.Error(), "control character") {
 		t.Errorf("a file with a control character: Start = %v", err)
+	}
+	// U+2028 is a space to the file's reader: it separates fields, and never
+	// reaches a rule.
+	p := started(t, withFile("/a /b\u2028302\n"), nil)
+	if got, want := p.Redirects(), []collage.BuiltRedirect{{From: "/a", To: "/b", Status: 302}}; !slices.Equal(got, want) {
+		t.Errorf("U+2028 file: Redirects() = %+v, want %+v", got, want)
 	}
 	h := app(t, withFile("/a /b 302\r\n/c /d\r\n"), nil, nil).Handler()
 	if rec := get(h, http.MethodGet, "/a"); rec.Code != 302 || rec.Header().Get("Location") != "/b" {
@@ -422,6 +428,7 @@ func TestRefusals(t *testing.T) {
 		"/a/*/b /c\n":              "* may only end",
 		"/a /b/:splat\n":           ":splat",
 		"/a //evil.example\n":      "http(s) URL",
+		"/a /\\evil.example\n":     "another host",
 		"/a javascript:alert(1)\n": "http(s) URL",
 		"/a /b\n/a /c\n":           "redirects.txt:2: /a is never reached",
 		"/a/* /x\n/a/b /y\n":       "redirects.txt:2: /a/b is never reached",
@@ -461,5 +468,52 @@ func TestShadowedPageWarns(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "a rule hides a page") || !strings.Contains(log.String(), "page=about") {
 		t.Errorf("no warning:\n%s", log.String())
+	}
+}
+
+var _ collage.BuildFinishedHook = redirects.New(redirects.Options{})
+
+// A rule the build leaves out, and a plugin rule covering a page's own redirect,
+// are warnings in the build's findings as well as at startup.
+func TestBuildFindings(t *testing.T) {
+	var log bytes.Buffer
+	a, err := collage.New(&collage.Config{
+		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
+		Plugins: []collage.Plugin{redirects.New(redirects.Options{Rules: []redirects.Rule{
+			{From: "/a{b}", To: "/c"},
+			{From: "/blog/*", To: "/posts/:splat"},
+		}})},
+		Logger: slog.New(slog.NewTextHandler(&log, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := collage.NewPage("about").WithContent(collage.NewFragment("about", "p.html").Build()).
+		WithPath("en", "/about").WithPermanentRedirect("/blog/old", "/about").Build()
+	if err := a.RegisterPage(page); err != nil {
+		t.Fatal(err)
+	}
+	b, err := collage.NewBuilder(a, collage.BuildOptions{OutDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := b.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for path, text := range map[string]string{
+		"/a{b}":     "Rules[0]",
+		"/blog/old": "/blog/*",
+	} {
+		found := slices.ContainsFunc(report.Findings, func(f collage.Finding) bool {
+			return f.Rule == "redirects-not-exported" && f.Level == collage.FindingWarning && f.Path == path && strings.Contains(f.Message, text)
+		})
+		if !found {
+			t.Errorf("no redirects-not-exported warning at %s naming %q: %+v", path, text, report.Findings)
+		}
+	}
+	if !strings.Contains(log.String(), "a rule covers a page's redirect") || !strings.Contains(log.String(), "/blog/old") {
+		t.Errorf("no startup warning for the covered redirect:\n%s", log.String())
 	}
 }

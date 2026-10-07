@@ -54,6 +54,7 @@ redirects: invalid rule: redirects.txt:14: /blog/2020/* is never reached: /blog/
 
 - a control character in a From or a To (a carriage return, a line feed, any other
   control character, or U+2028/U+2029), from the file, Go or configuration;
+- a target beginning `/\`, which a browser reads as another host, as it does `//`;
 - a line that is not `FROM TO [STATUS]`, a status that is not one of the five, a
   `-` without `410` or a `410` with a target, a `:splat` with no `/*`, a target
   that is neither a path nor an `http(s)` URL;
@@ -86,6 +87,8 @@ The rules are handed over in collage's pattern syntax:
 | `/blog/* /posts` | From `/blog`, To `/posts`; and From `/blog/{rest...}`, To `/posts` |
 | `/blog /x` then `/blog/* /y/:splat` | From `/blog`, To `/x`; and From `/blog/{rest...}`, To `/y/{rest}` |
 | `/* https://new.example/:splat` | From `/`, and From `/{rest...}`: a build that writes any file fails |
+| `/blog/* /posts/:splat`, request `/blog/a/` | the server sends `/posts/a/`; collage's router drops the trailing `/` before capturing, so read as the build's rule it is `/posts/a`, and each host follows its own reading |
+| `/caf%C3%A9 /x` | From `/caf%C3%A9`, as written: a `%` in From is handed over raw, and both the plugin and the router read it as the literal characters, not as an escape; a host may decode it |
 
 A prefix becomes two rules because collage's catch-all needs at least one segment
 and the plugin's `/*` matches the path itself too; the path is left out when an
@@ -93,7 +96,8 @@ earlier rule already takes it, as the middleware's first match would. A rule
 collage's syntax cannot say — a `{` or `}` in From or To, which collage reads as
 a placeholder, an empty segment (`/a//b`), or `:splat` in an absolute target's
 host — is still served, but left out of the build, with a warning when the
-application starts.
+application starts and a `redirects-not-exported` warning in the build's
+findings.
 
 ## Rules in Go
 
@@ -138,6 +142,13 @@ replaces the list given in Go, as decoding JSON into a slice does.
   static build refuses a redirect over a file it wrote
   (`collage.ErrRedirectShadowsFile`): a site whose export worked with v0.1.x can
   fail to build until the rule or the page goes.
+- A rule covering a page's or a document's own redirect — the plugin's `/blog/*`
+  and a page's `WithPermanentRedirect("/blog/old", "/elsewhere")` — sends
+  `/blog/old` by the rule on the server, since the middleware runs before routing,
+  and by the page's redirect on a static host. It is warned about when the
+  application starts (pages only) and as a `redirects-not-exported` finding in a
+  build (pages and documents). The same From in both exactly fails the build with
+  `collage.ErrDuplicateRedirect`, while the server lets the plugin's rule win.
 - What each host can carry — 410, 307 and 308, rule limits, query strings — is
   elagoht/deploy's to report, as warnings in the build's findings.
 
@@ -150,7 +161,11 @@ replaces the list given in Go, as decoding JSON into a slice does.
   elagoht/deploy, which writes each host's own format. `Options.NoRedirectsFile`
   and `RedirectsFile()` are gone; a `noRedirectsFile` key in configuration is
   ignored.
-- A control character in a rule's From or To is refused at startup.
+- A control character in a rule's From or To is refused at startup, and so is a
+  To beginning `/\`, which a browser reads as another host: until now it was
+  served.
+- A build's findings carry a `redirects-not-exported` warning for each rule left
+  out of the build and each page's or document's redirect a rule covers.
 - Requires collage v0.52.0.
 
 ### v0.1.6

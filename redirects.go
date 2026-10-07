@@ -89,8 +89,9 @@ type Plugin struct {
 }
 
 var (
-	_ collage.Plugin         = (*Plugin)(nil)
-	_ collage.RedirectSource = (*Plugin)(nil)
+	_ collage.Plugin            = (*Plugin)(nil)
+	_ collage.RedirectSource    = (*Plugin)(nil)
+	_ collage.BuildFinishedHook = (*Plugin)(nil)
 )
 
 // New returns a plugin with opts as its starting point, which the application's
@@ -202,8 +203,8 @@ func parse(name string, body []byte) ([]rule, error) {
 var ErrInvalidRule = errors.New("redirects: invalid rule")
 
 func newRule(r Rule, source string) (rule, error) {
-	bad := func(format string, args ...any) (rule, error) { // any: fmt's own variadic parameter
-		return rule{}, fmt.Errorf("%w: %s: %s", ErrInvalidRule, source, fmt.Sprintf(format, args...))
+	bad := func(reason string) (rule, error) {
+		return rule{}, fmt.Errorf("%w: %s: %s", ErrInvalidRule, source, reason)
 	}
 	if r.Status == 0 {
 		r.Status = http.StatusMovedPermanently
@@ -211,18 +212,18 @@ func newRule(r Rule, source string) (rule, error) {
 	switch r.Status {
 	case http.StatusMovedPermanently, http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect, http.StatusGone:
 	default:
-		return bad("status %d is none of 301, 302, 307, 308, 410", r.Status)
+		return bad(fmt.Sprintf("status %d is none of 301, 302, 307, 308, 410", r.Status))
 	}
 	if !strings.HasPrefix(r.From, "/") || strings.HasPrefix(r.From, "//") {
-		return bad("from %q must be a path beginning with one /", r.From)
+		return bad(fmt.Sprintf("from %q must be a path beginning with one /", r.From))
 	}
 	for _, field := range []struct{ name, value string }{{"from", r.From}, {"to", r.To}} {
 		if controlCharacter(field.value) {
-			return bad("%s %q holds a control character", field.name, field.value)
+			return bad(fmt.Sprintf("%s %q holds a control character", field.name, field.value))
 		}
 	}
 	if strings.ContainsAny(r.From, "?# \t") {
-		return bad("from %q must be a path alone: a query or fragment cannot be matched", r.From)
+		return bad(fmt.Sprintf("from %q must be a path alone: a query or fragment cannot be matched", r.From))
 	}
 	out := rule{Rule: r, source: source}
 	base := r.From
@@ -231,7 +232,7 @@ func newRule(r Rule, source string) (rule, error) {
 		base = strings.TrimSuffix(base, "/*")
 	}
 	if strings.Contains(base, "*") {
-		return bad("from %q: * may only end a path, as /*", r.From)
+		return bad(fmt.Sprintf("from %q: * may only end a path, as /*", r.From))
 	}
 	if base != "/" && base != "" {
 		base = strings.TrimSuffix(base, "/")
@@ -240,26 +241,28 @@ func newRule(r Rule, source string) (rule, error) {
 
 	if r.Status == http.StatusGone {
 		if r.To != "" && r.To != "-" {
-			return bad("a 410 is gone and goes nowhere: to must be \"-\", got %q", r.To)
+			return bad(fmt.Sprintf("a 410 is gone and goes nowhere: to must be \"-\", got %q", r.To))
 		}
 		out.To = "-"
 		return out, nil
 	}
 	switch {
 	case r.To == "" || r.To == "-":
-		return bad("to is required for status %d", r.Status)
+		return bad(fmt.Sprintf("to is required for status %d", r.Status))
+	case strings.HasPrefix(r.To, "/\\"):
+		return bad(fmt.Sprintf("to %q begins with /\\, which a browser reads as another host", r.To))
 	case strings.HasPrefix(r.To, "/") && !strings.HasPrefix(r.To, "//"):
 	default:
 		u, err := url.Parse(r.To)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return bad("to %q must be a path beginning with one / or an http(s) URL", r.To)
+			return bad(fmt.Sprintf("to %q must be a path beginning with one / or an http(s) URL", r.To))
 		}
 	}
 	if strings.ContainsAny(r.To, " \t") {
-		return bad("to %q holds a space", r.To)
+		return bad(fmt.Sprintf("to %q holds a space", r.To))
 	}
 	if strings.Contains(r.To, ":splat") && !out.prefix {
-		return bad("to %q uses :splat, which only a from ending in /* has", r.To)
+		return bad(fmt.Sprintf("to %q uses :splat, which only a from ending in /* has", r.To))
 	}
 	return out, nil
 }
@@ -366,7 +369,41 @@ func (p *Plugin) warnShadowedPages(ctx context.Context, host collage.Host) {
 				host.Logger().Warn("redirects: a rule hides a page", "rule", r.From, "at", r.source, "page", page.Name, "path", u.Path)
 			}
 		}
+		for _, red := range page.Redirects {
+			if r, ok := p.covers(red.From); ok {
+				host.Logger().Warn("redirects: a rule covers a page's redirect; the server sends it by the rule, a static host by the page", "rule", r.From, "at", r.source, "page", page.Name, "redirect", red.From)
+			}
+		}
 	}
+}
+
+// covers returns the rule the middleware answers from with, a page's or a
+// document's redirect pattern read as a path, before routing ever sees it.
+func (p *Plugin) covers(from string) (*rule, bool) {
+	r, _, ok := match(p.rules, (&url.URL{Path: from}).EscapedPath())
+	return r, ok
+}
+
+// OnBuildFinished reports, as warnings in the build's findings, what a static
+// host will not do as the server does: a rule Redirects left out, and a page's
+// or a document's redirect one of the rules covers — the server answers it by
+// the rule, before routing, and a host by the page's own redirect.
+func (p *Plugin) OnBuildFinished(_ context.Context, ev *collage.BuildFinishedEvent) error {
+	for i := range p.rules {
+		r := &p.rules[i]
+		if reason := uncarried(r); reason != "" {
+			ev.Warn(r.From, "redirects-not-exported", fmt.Sprintf("%s (%s) is served but not exported: %s", r.From, r.source, reason))
+		}
+	}
+	for _, red := range ev.Redirects {
+		if red.Source == Name {
+			continue
+		}
+		if r, ok := p.covers(red.From); ok {
+			ev.Warn(red.From, "redirects-not-exported", fmt.Sprintf("%s (%s) covers the redirect from %s of %s: the server answers it by the rule, a static host by %s's own redirect", r.From, r.source, red.From, red.Source, red.Source))
+		}
+	}
+	return nil
 }
 
 func (p *Plugin) middleware(next http.Handler) http.Handler {
