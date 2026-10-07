@@ -13,7 +13,7 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.24.0 or later.
+Requires collage v0.50.0 or later.
 
 ## The file
 
@@ -126,6 +126,10 @@ replaces the list given in Go, as decoding JSON into a slice does.
   each host has its own rules for query strings.
 
 ## Changes
+
+### v0.1.4
+
+- Requires collage v0.50.0. Plugin configuration is read with `collage.PluginConfig`, since `host.Config` is gone. Nothing else changes.
 
 ### v0.1.2
 
