@@ -93,7 +93,7 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.1.4" }
+func (p *Plugin) Version() string                { return "0.1.5" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // Init reads the rules, refuses any that are wrong, warns of any that hide a page,
