@@ -19,13 +19,15 @@
 // reach, or rules that send a reader round in a circle stops the application from
 // starting, with the line that is wrong.
 //
-// A static host cannot run the middleware, so the plugin also serves the rules as
-// /_redirects, in the format Netlify and Cloudflare Pages read, and a static build
-// writes it beside the pages.
+// A static host cannot run the middleware, so the plugin is a collage
+// RedirectSource: a static build asks it for its rules, in the router's own
+// pattern syntax, and hands them to whichever plugin writes a host's
+// configuration (elagoht/deploy). A prefix, "/blog/*", becomes the path itself,
+// "/blog", and a catch-all under it, "/blog/{rest...}", with ":splat" in the
+// destination spelled "{rest}".
 package redirects
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -35,6 +37,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/Elagoht/collage/pkg/collage"
 )
@@ -52,9 +55,6 @@ type Options struct {
 	File string `json:"file"`
 	// Rules are redirects given in Go or configuration, checked after the file's.
 	Rules []Rule `json:"rules"`
-	// NoRedirectsFile leaves out /_redirects, the copy of the rules a static
-	// host reads.
-	NoRedirectsFile bool `json:"noRedirectsFile"`
 }
 
 // Rule is one redirect.
@@ -88,12 +88,17 @@ type Plugin struct {
 	host collage.Host
 }
 
+var (
+	_ collage.Plugin         = (*Plugin)(nil)
+	_ collage.RedirectSource = (*Plugin)(nil)
+)
+
 // New returns a plugin with opts as its starting point, which the application's
 // own configuration is then decoded over.
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.1.6" }
+func (p *Plugin) Version() string                { return "0.2.0" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // Init reads the rules, refuses any that are wrong, warns of any that hide a page,
@@ -114,16 +119,7 @@ func (p *Plugin) Init(ctx context.Context, host collage.Host) error {
 	p.rules = rules
 	p.host = host
 	p.warnShadowedPages(ctx, host)
-
-	if !p.opts.NoRedirectsFile {
-		doc := collage.NewDocument(Name, "text/plain; charset=utf-8").
-			AtRoot("/_redirects").
-			WithBody(p.RedirectsFile()).
-			Build()
-		if err := host.RegisterDocument(doc); err != nil {
-			return fmt.Errorf("redirects: %w", err)
-		}
-	}
+	p.warnUncarried(host)
 	if len(p.rules) == 0 {
 		return nil
 	}
@@ -219,6 +215,11 @@ func newRule(r Rule, source string) (rule, error) {
 	}
 	if !strings.HasPrefix(r.From, "/") || strings.HasPrefix(r.From, "//") {
 		return bad("from %q must be a path beginning with one /", r.From)
+	}
+	for _, field := range []struct{ name, value string }{{"from", r.From}, {"to", r.To}} {
+		if controlCharacter(field.value) {
+			return bad("%s %q holds a control character", field.name, field.value)
+		}
 	}
 	if strings.ContainsAny(r.From, "?# \t") {
 		return bad("from %q must be a path alone: a query or fragment cannot be matched", r.From)
@@ -401,18 +402,95 @@ func withQuery(target, query string) string {
 	return target + "?" + query + fragment
 }
 
-// RedirectsFile returns the rules in the _redirects format Netlify and Cloudflare
-// Pages read. A 410 has no equivalent every such host understands, so it is written
-// as a comment.
-func (p *Plugin) RedirectsFile() []byte {
-	var b bytes.Buffer
-	b.WriteString("# Written by elagoht/redirects from the application's rules.\n")
-	for _, r := range p.rules {
-		if r.Status == http.StatusGone {
-			fmt.Fprintf(&b, "# %s is gone (410)\n", r.From)
+// controlCharacter reports whether s holds a character that would split a line
+// of a host's file or a header: the set collage refuses in a static build's
+// redirects.
+func controlCharacter(s string) bool {
+	for _, c := range s {
+		if unicode.IsControl(c) || c == '\u2028' || c == '\u2029' {
+			return true
+		}
+	}
+	return false
+}
+
+// Redirects returns the rules for a static build, in collage's pattern syntax and
+// in the order the middleware tries them. A prefix "/x/*" is the path "/x",
+// unless an earlier rule takes it, and the catch-all "/x/{rest...}", whose
+// ":splat" is "{rest}"; collage's catch-all needs at least one segment, the
+// plugin's prefix does not. A 410 has no destination. A rule the router's
+// grammar cannot say is left out; Init warned of it.
+func (p *Plugin) Redirects() []collage.BuiltRedirect {
+	var out []collage.BuiltRedirect
+	for i := range p.rules {
+		r := &p.rules[i]
+		if uncarried(r) != "" {
 			continue
 		}
-		fmt.Fprintf(&b, "%s %s %d\n", r.From, r.To, r.Status)
+		to := r.To
+		if r.Status == http.StatusGone {
+			to = ""
+		}
+		if !r.prefix {
+			out = append(out, collage.BuiltRedirect{From: r.From, To: to, Status: r.Status})
+			continue
+		}
+		base := strings.TrimSuffix(r.From, "/*")
+		probe := r.base
+		if probe == "" {
+			probe = "/"
+		}
+		if first, _, _ := match(p.rules, probe); first == r {
+			literal := to
+			if literal != "" {
+				literal = r.target("")
+			}
+			from := base
+			if from == "" {
+				from = "/"
+			}
+			out = append(out, collage.BuiltRedirect{From: from, To: literal, Status: r.Status})
+		}
+		out = append(out, collage.BuiltRedirect{
+			From:   base + "/{rest...}",
+			To:     strings.ReplaceAll(to, ":splat", "{rest}"),
+			Status: r.Status,
+		})
 	}
-	return b.Bytes()
+	return out
+}
+
+// uncarried returns why collage's router cannot say r, or "": a "{" or "}",
+// which the router reads as a placeholder and the plugin as text; an empty
+// segment, which no pattern has; or ":splat" in an absolute destination's
+// scheme://authority, which would let a request choose the host.
+func uncarried(r *rule) string {
+	switch {
+	case strings.ContainsAny(r.From, "{}"):
+		return "from holds a { or }, which collage reads as a placeholder"
+	case r.Status != http.StatusGone && strings.ContainsAny(r.To, "{}"):
+		return "to holds a { or }, which collage reads as a placeholder"
+	case strings.Contains(r.From, "//"):
+		return "from has an empty segment, which no collage pattern has"
+	}
+	if at := strings.Index(r.To, "://"); r.prefix && at >= 0 {
+		authority := r.To[at+3:]
+		if end := strings.IndexAny(authority, "/?#"); end >= 0 {
+			authority = authority[:end]
+		}
+		if strings.Contains(authority, ":splat") {
+			return "to has :splat in its host, which a static build refuses"
+		}
+	}
+	return ""
+}
+
+// warnUncarried logs each rule Redirects leaves out: it is served, but a static
+// host never sees it.
+func (p *Plugin) warnUncarried(host collage.Host) {
+	for i := range p.rules {
+		if reason := uncarried(&p.rules[i]); reason != "" {
+			host.Logger().Warn("redirects: a static build cannot carry a rule; it is served but not exported", "rule", p.rules[i].From, "at", p.rules[i].source, "reason", reason)
+		}
+	}
 }

@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -137,23 +139,20 @@ func TestGoneServesNotFoundPage(t *testing.T) {
 	}
 }
 
-// What a static host reads: every rule but a 410, which it has no word for.
-func TestRedirectsFile(t *testing.T) {
-	rec := get(app(t, withFile(file), nil, nil).Handler(), http.MethodGet, "/_redirects")
-	want := "# Written by elagoht/redirects from the application's rules.\n" +
-		"/blog/* /posts/:splat 301\n" +
-		"/about-us /about 301\n" +
-		"/summer-sale /sale?from=summer#top 302\n" +
-		"/moved https://new.example/moved 308\n" +
-		"# /old-product is gone (410)\n" +
-		"/docs/* https://docs.example/:splat 307\n"
-	if rec.Code != http.StatusOK || rec.Body.String() != want {
-		t.Errorf("/_redirects = %d\n%s\nwant\n%s", rec.Code, rec.Body.String(), want)
+// The plugin no longer writes a copy of its rules: GET /_redirects finds
+// nothing, no document is registered, and a build with no deploy plugin writes
+// no _redirects file.
+func TestNoRedirectsDocument(t *testing.T) {
+	a := app(t, withFile(file), nil, nil)
+	if err := a.Start(); err != nil {
+		t.Fatal(err)
 	}
-}
-
-// A static build writes _redirects as a file of its own.
-func TestStaticBuild(t *testing.T) {
+	if code := get(a.Handler(), http.MethodGet, "/_redirects").Code; code != http.StatusNotFound {
+		t.Errorf("/_redirects = %d, want 404", code)
+	}
+	for _, doc := range a.Documents() {
+		t.Errorf("a document is registered: %q", doc.Name)
+	}
 	out := t.TempDir()
 	b, err := collage.NewBuilder(app(t, withFile(file), nil, nil), collage.BuildOptions{OutDir: out})
 	if err != nil {
@@ -162,15 +161,225 @@ func TestStaticBuild(t *testing.T) {
 	if _, err := b.Build(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	body, err := os.ReadFile(filepath.Join(out, "_redirects"))
-	if err != nil || !strings.Contains(string(body), "/blog/* /posts/:splat 301\n") {
-		t.Errorf("_redirects = %q, %v", body, err)
+	if _, err := os.Stat(filepath.Join(out, "_redirects")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the build wrote _redirects: %v", err)
 	}
+}
 
-	off := withFile(file)
-	off.NoRedirectsFile = true
-	if code := get(app(t, off, nil, nil).Handler(), http.MethodGet, "/_redirects").Code; code != http.StatusNotFound {
-		t.Errorf("NoRedirectsFile: /_redirects = %d", code)
+// fileRules is what Redirects() hands a build for the file fixture: every rule,
+// a 410 with no destination, and a prefix as the path itself and a catch-all
+// under it.
+var fileRules = []collage.BuiltRedirect{
+	{From: "/blog", To: "/posts/", Status: 301},
+	{From: "/blog/{rest...}", To: "/posts/{rest}", Status: 301},
+	{From: "/about-us", To: "/about", Status: 301},
+	{From: "/summer-sale", To: "/sale?from=summer#top", Status: 302},
+	{From: "/moved", To: "https://new.example/moved", Status: 308},
+	{From: "/old-product", To: "", Status: 410},
+	{From: "/docs", To: "https://docs.example/", Status: 307},
+	{From: "/docs/{rest...}", To: "https://docs.example/{rest}", Status: 307},
+}
+
+func started(t *testing.T, opts redirects.Options, log *bytes.Buffer) *redirects.Plugin {
+	t.Helper()
+	p := redirects.New(opts)
+	cfg := &collage.Config{
+		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
+		Plugins:  []collage.Plugin{p},
+	}
+	if log == nil {
+		log = new(bytes.Buffer)
+	}
+	cfg.Logger = slog.New(slog.NewTextHandler(log, nil))
+	a, err := collage.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Start(); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestRedirectSource(t *testing.T) {
+	var _ collage.RedirectSource = redirects.New(redirects.Options{})
+	got := started(t, withFile(file), nil).Redirects()
+	if !slices.Equal(got, fileRules) {
+		t.Errorf("Redirects() =\n%+v\nwant\n%+v", got, fileRules)
+	}
+}
+
+// Each form the plugin reads, in the router's spelling.
+func TestRedirectsMapping(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		rules []redirects.Rule
+		want  []collage.BuiltRedirect
+	}{
+		{"exact, status defaulted", []redirects.Rule{{From: "/a", To: "/b"}},
+			[]collage.BuiltRedirect{{From: "/a", To: "/b", Status: 301}}},
+		{"trailing slash kept as written", []redirects.Rule{{From: "/a/", To: "/b/", Status: 308}},
+			[]collage.BuiltRedirect{{From: "/a/", To: "/b/", Status: 308}}},
+		{"unescaped path", []redirects.Rule{{From: "/café", To: "/caf%C3%A9-new"}},
+			[]collage.BuiltRedirect{{From: "/café", To: "/caf%C3%A9-new", Status: 301}}},
+		{"gone, \"-\"", []redirects.Rule{{From: "/a", To: "-", Status: 410}},
+			[]collage.BuiltRedirect{{From: "/a", Status: 410}}},
+		{"gone, empty", []redirects.Rule{{From: "/a", Status: 410}},
+			[]collage.BuiltRedirect{{From: "/a", Status: 410}}},
+		{"prefix with :splat", []redirects.Rule{{From: "/x/*", To: "/y/:splat", Status: 302}},
+			[]collage.BuiltRedirect{{From: "/x", To: "/y/", Status: 302}, {From: "/x/{rest...}", To: "/y/{rest}", Status: 302}}},
+		{"prefix without :splat", []redirects.Rule{{From: "/x/*", To: "/y"}},
+			[]collage.BuiltRedirect{{From: "/x", To: "/y", Status: 301}, {From: "/x/{rest...}", To: "/y", Status: 301}}},
+		{"prefix, :splat twice and in a query", []redirects.Rule{{From: "/x/*", To: "https://e.example/:splat?from=:splat"}},
+			[]collage.BuiltRedirect{{From: "/x", To: "https://e.example/?from=", Status: 301}, {From: "/x/{rest...}", To: "https://e.example/{rest}?from={rest}", Status: 301}}},
+		{"prefix gone", []redirects.Rule{{From: "/x/*", To: "-", Status: 410}},
+			[]collage.BuiltRedirect{{From: "/x", Status: 410}, {From: "/x/{rest...}", Status: 410}}},
+		{"root prefix", []redirects.Rule{{From: "/*", To: "https://new.example/:splat"}},
+			[]collage.BuiltRedirect{{From: "/", To: "https://new.example/", Status: 301}, {From: "/{rest...}", To: "https://new.example/{rest}", Status: 301}}},
+		// /x itself is the earlier rule's, as the middleware's first match is:
+		// the prefix brings only its catch-all.
+		{"prefix after its own path", []redirects.Rule{{From: "/x", To: "/a"}, {From: "/x/*", To: "/b/:splat"}},
+			[]collage.BuiltRedirect{{From: "/x", To: "/a", Status: 301}, {From: "/x/{rest...}", To: "/b/{rest}", Status: 301}}},
+		{"prefix after its own path, slashed", []redirects.Rule{{From: "/x/", To: "/a"}, {From: "/x/*", To: "/b"}},
+			[]collage.BuiltRedirect{{From: "/x/", To: "/a", Status: 301}, {From: "/x/{rest...}", To: "/b", Status: 301}}},
+	} {
+		got := started(t, redirects.Options{Rules: c.rules}, nil).Redirects()
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s: Redirects() =\n%+v\nwant\n%+v", c.name, got, c.want)
+		}
+	}
+}
+
+// A rule the router's grammar cannot say is served as before, left out of the
+// build, and warned about when the application starts.
+func TestRedirectsLeaveOutWhatTheRouterCannotSay(t *testing.T) {
+	for _, c := range []struct {
+		rule   redirects.Rule
+		reason string
+	}{
+		{redirects.Rule{From: "/a{b}", To: "/c"}, "{"},
+		{redirects.Rule{From: "/a}", To: "/c"}, "{"},
+		{redirects.Rule{From: "/x{y}/*", To: "/c/:splat"}, "{"},
+		{redirects.Rule{From: "/a", To: "/b{c}"}, "{"},
+		{redirects.Rule{From: "/x/*", To: "/{rest}/:splat"}, "{"},
+		{redirects.Rule{From: "/a//b", To: "/c"}, "empty segment"},
+		{redirects.Rule{From: "/a//*", To: "/c"}, "empty segment"},
+		{redirects.Rule{From: "/x/*", To: "https://:splat@e.example/"}, "host"},
+	} {
+		var log bytes.Buffer
+		opts := redirects.Options{Rules: []redirects.Rule{c.rule, {From: "/kept", To: "/k"}}}
+		got := started(t, opts, &log).Redirects()
+		want := []collage.BuiltRedirect{{From: "/kept", To: "/k", Status: 301}}
+		if !slices.Equal(got, want) {
+			t.Errorf("%+v: Redirects() = %+v, want only /kept", c.rule, got)
+		}
+		if !strings.Contains(log.String(), "a static build cannot carry") || !strings.Contains(log.String(), "Rules[0]") || !strings.Contains(log.String(), c.reason) {
+			t.Errorf("%+v: no warning naming it and %q:\n%s", c.rule, c.reason, log.String())
+		}
+	}
+	// Still served.
+	h := app(t, redirects.Options{Rules: []redirects.Rule{{From: "/a{b}", To: "/c"}}}, nil, nil).Handler()
+	if rec := get(h, http.MethodGet, "/a%7Bb%7D"); rec.Code != 301 || rec.Header().Get("Location") != "/c" {
+		t.Errorf("/a{b} = %d %q, want 301 /c", rec.Code, rec.Header().Get("Location"))
+	}
+}
+
+// capture is a plugin that keeps what the finished build hands its hook.
+type capture struct{ ev *collage.BuildFinishedEvent }
+
+func (*capture) Name() string                             { return "test/capture" }
+func (*capture) Version() string                          { return "0.0.0" }
+func (*capture) Init(context.Context, collage.Host) error { return nil }
+func (*capture) Shutdown(context.Context) error           { return nil }
+func (c *capture) OnBuildFinished(_ context.Context, ev *collage.BuildFinishedEvent) error {
+	c.ev = ev
+	return nil
+}
+
+// The core takes every rule as it is handed over: a real build, no error, and
+// the hook sees the rules stamped with the plugin's name.
+func TestBuildCarriesTheRules(t *testing.T) {
+	c := &capture{}
+	a, err := collage.New(&collage.Config{
+		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
+		Plugins:  []collage.Plugin{redirects.New(withFile(file)), c},
+		Logger:   slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RegisterPage(collage.NewPage("about").WithContent(collage.NewFragment("about", "p.html").Build()).WithPath("en", "/about").Build()); err != nil {
+		t.Fatal(err)
+	}
+	b, err := collage.NewBuilder(a, collage.BuildOptions{OutDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Build(context.Background()); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	want := make([]collage.BuiltRedirect, len(fileRules))
+	for i, r := range fileRules {
+		r.Source = redirects.Name
+		want[i] = r
+	}
+	if c.ev == nil || !slices.Equal(c.ev.Redirects, want) {
+		t.Errorf("the hook's redirects =\n%+v\nwant\n%+v", c.ev, want)
+	}
+}
+
+// A root prefix takes every path, so a build that writes any file fails, as a
+// redirect over a written file always does; the server is unaffected.
+func TestRootPrefixFailsTheBuild(t *testing.T) {
+	a := app(t, redirects.Options{Rules: []redirects.Rule{{From: "/*", To: "https://new.example/:splat"}}}, nil, nil)
+	b, err := collage.NewBuilder(a, collage.BuildOptions{OutDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Build(context.Background()); !errors.Is(err, collage.ErrRedirectShadowsFile) {
+		t.Errorf("Build = %v, want ErrRedirectShadowsFile", err)
+	}
+}
+
+// A control character in From or To is refused, from Go and from configuration
+// alike, as the core would refuse it in a build; a CRLF file still reads.
+func TestControlCharacters(t *testing.T) {
+	for _, r := range []redirects.Rule{
+		{From: "/a\r", To: "/b"},
+		{From: "/a\nb", To: "/b"},
+		{From: "/a\x00", To: "/b"},
+		{From: "/a\x7f", To: "/b"},
+		{From: "/a\u0085", To: "/b"},
+		{From: "/a\u2028", To: "/b"},
+		{From: "/a", To: "/b\r\nSet-Cookie: x=1"},
+		{From: "/a", To: "/b\x1b"},
+		{From: "/a", To: "https://e.example/\u2029"},
+		{From: "/x/*", To: "/b\n:splat"},
+	} {
+		a := app(t, redirects.Options{Rules: []redirects.Rule{r}}, nil, nil)
+		if err := a.Start(); !errors.Is(err, redirects.ErrInvalidRule) || !strings.Contains(err.Error(), "control character") {
+			t.Errorf("%q -> %q: Start = %v, want ErrInvalidRule for a control character", r.From, r.To, err)
+		}
+	}
+	for _, raw := range []string{
+		`{"rules":[{"from":"/a\r","to":"/b"}]}`,
+		`{"rules":[{"from":"/a","to":"/b\nLocation: /evil"}]}`,
+		`{"rules":[{"from":"/a","to":"/b\u0000"}]}`,
+		`{"rules":[{"from":"/a\u2028","to":"/b"}]}`,
+	} {
+		config := map[string]json.RawMessage{redirects.Name: json.RawMessage(raw)}
+		if err := app(t, redirects.Options{}, config, nil).Start(); !errors.Is(err, redirects.ErrInvalidRule) || !strings.Contains(err.Error(), "control character") {
+			t.Errorf("%s: Start = %v, want ErrInvalidRule for a control character", raw, err)
+		}
+	}
+	if err := app(t, withFile("/a\x01 /b\n"), nil, nil).Start(); !errors.Is(err, redirects.ErrInvalidRule) {
+		t.Errorf("a file with a control character: Start = %v", err)
+	}
+	h := app(t, withFile("/a /b 302\r\n/c /d\r\n"), nil, nil).Handler()
+	if rec := get(h, http.MethodGet, "/a"); rec.Code != 302 || rec.Header().Get("Location") != "/b" {
+		t.Errorf("CRLF file: /a = %d %q", rec.Code, rec.Header().Get("Location"))
 	}
 }
 

@@ -11,10 +11,6 @@
         "type": "string",
         "description": "File is the redirects file's name. Default \"redirects.txt\"."
       },
-      "noRedirectsFile": {
-        "type": "boolean",
-        "description": "NoRedirectsFile leaves out /_redirects, the copy of the rules a static host reads."
-      },
       "rules": {
         "type": "array",
         "description": "Rules are redirects given in Go or configuration, checked after the file's.",

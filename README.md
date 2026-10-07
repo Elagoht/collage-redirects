@@ -2,7 +2,8 @@
 
 A collage plugin for redirects kept in a file rather than in code — what a site
 migration leaves behind, hundreds of old addresses and where each one went —
-served before routing, and written for a static host as a `_redirects` file.
+served before routing, and handed to a static build for the host's own
+configuration.
 
 ```go
 //go:embed redirects.txt
@@ -13,7 +14,7 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.50.0 or later.
+Requires collage v0.52.0 or later.
 
 ## The file
 
@@ -51,6 +52,8 @@ A file that is wrong stops the application from starting, and says where:
 redirects: invalid rule: redirects.txt:14: /blog/2020/* is never reached: /blog/* (redirects.txt:3) matches it first
 ```
 
+- a control character in a From or a To (a carriage return, a line feed, any other
+  control character, or U+2028/U+2029), from the file, Go or configuration;
 - a line that is not `FROM TO [STATUS]`, a status that is not one of the five, a
   `-` without `410` or a `410` with a target, a `:splat` with no `/*`, a target
   that is neither a path nor an `http(s)` URL;
@@ -66,19 +69,31 @@ logged as a warning when the application starts.
 
 ## Static hosts
 
-A static host cannot run the middleware, so the plugin also serves the rules at
-`/_redirects`, in the format Netlify and Cloudflare Pages read, and a static build
-writes it at the root of the output:
+A static host cannot run the middleware. The plugin is a collage `RedirectSource`:
+a static build asks it for its rules, checks them as the router would, and hands
+them, with the pages' own redirects, to the plugin that writes a host's
+configuration — [elagoht/deploy](https://github.com/Elagoht/collage-deploy), which
+writes `_redirects` for Netlify and Cloudflare Pages, `vercel.json` for Vercel, or
+redirect pages for GitHub Pages. Without such a plugin nothing is written.
 
-```
-# Written by elagoht/redirects from the application's rules.
-/blog/* /posts/:splat 301
-/about-us /about 301
-# /old-product is gone (410)
-```
+The rules are handed over in collage's pattern syntax:
 
-A `410` is written as a comment: neither host has a way to say "gone" every other
-understands. `noRedirectsFile` leaves `/_redirects` out.
+| In the plugin | To the build |
+|---|---|
+| `/about-us /about 301` | From `/about-us`, To `/about`, 301 (From as written, a trailing `/` kept) |
+| `/old-product - 410` | From `/old-product`, To empty, 410 |
+| `/blog/* /posts/:splat` | From `/blog`, To `/posts/`; and From `/blog/{rest...}`, To `/posts/{rest}` |
+| `/blog/* /posts` | From `/blog`, To `/posts`; and From `/blog/{rest...}`, To `/posts` |
+| `/blog /x` then `/blog/* /y/:splat` | From `/blog`, To `/x`; and From `/blog/{rest...}`, To `/y/{rest}` |
+| `/* https://new.example/:splat` | From `/`, and From `/{rest...}`: a build that writes any file fails |
+
+A prefix becomes two rules because collage's catch-all needs at least one segment
+and the plugin's `/*` matches the path itself too; the path is left out when an
+earlier rule already takes it, as the middleware's first match would. A rule
+collage's syntax cannot say — a `{` or `}` in From or To, which collage reads as
+a placeholder, an empty segment (`/a//b`), or `:splat` in an absolute target's
+host — is still served, but left out of the build, with a warning when the
+application starts.
 
 ## Rules in Go
 
@@ -101,8 +116,7 @@ redirects.New(redirects.Options{
 {
   "elagoht/redirects": {
     "file": "redirects.txt",
-    "rules": [{ "from": "/careers", "to": "https://jobs.example.com", "status": 302 }],
-    "noRedirectsFile": false
+    "rules": [{ "from": "/careers", "to": "https://jobs.example.com", "status": 302 }]
   }
 }
 ```
@@ -120,12 +134,24 @@ replaces the list given in Go, as decoding JSON into a slice does.
   pattern without `WithStaticParams`, and every document, is not.
 - A loop through another host — `/a` to `https://example.com/b`, which is this
   site — cannot be seen.
-- `/_redirects` is served by the running application too, which is harmless and
-  lets you see what a static host would read. Netlify and Cloudflare Pages differ in
-  details the plugin does not paper over: Cloudflare caps the number of rules, and
-  each host has its own rules for query strings.
+- A rule over a page's path is only a warning to the running application, but a
+  static build refuses a redirect over a file it wrote
+  (`collage.ErrRedirectShadowsFile`): a site whose export worked with v0.1.x can
+  fail to build until the rule or the page goes.
+- What each host can carry — 410, 307 and 308, rule limits, query strings — is
+  elagoht/deploy's to report, as warnings in the build's findings.
 
 ## Changes
+
+### v0.2.0
+
+- Breaking: the plugin no longer serves or writes `/_redirects`. It is a collage
+  `RedirectSource`, and a static build hands its rules to a deploy plugin such as
+  elagoht/deploy, which writes each host's own format. `Options.NoRedirectsFile`
+  and `RedirectsFile()` are gone; a `noRedirectsFile` key in configuration is
+  ignored.
+- A control character in a rule's From or To is refused at startup.
+- Requires collage v0.52.0.
 
 ### v0.1.6
 
