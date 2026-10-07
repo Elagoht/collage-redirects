@@ -385,9 +385,12 @@ func (p *Plugin) covers(from string) (*rule, bool) {
 }
 
 // OnBuildFinished reports, as warnings in the build's findings, what a static
-// host will not do as the server does: a rule Redirects left out, and a page's
-// or a document's redirect one of the rules covers — the server answers it by
-// the rule, before routing, and a host by the page's own redirect.
+// host will not do as the server does: a rule Redirects left out
+// (redirects-not-exported), and a page's or a document's redirect one of the
+// rules covers (redirects-overlap) — the server answers it by the rule, before
+// routing, and a host by the page's own redirect. A page's redirect from the
+// very path one of the rules is exported from is left to the build, which
+// fails with collage.ErrDuplicateRedirect.
 func (p *Plugin) OnBuildFinished(_ context.Context, ev *collage.BuildFinishedEvent) error {
 	for i := range p.rules {
 		r := &p.rules[i]
@@ -395,15 +398,46 @@ func (p *Plugin) OnBuildFinished(_ context.Context, ev *collage.BuildFinishedEve
 			ev.Warn(r.From, "redirects-not-exported", fmt.Sprintf("%s (%s) is served but not exported: %s", r.From, r.source, reason))
 		}
 	}
+	exported := map[string]bool{}
 	for _, red := range ev.Redirects {
 		if red.Source == Name {
+			exported[patternKey(red.From)] = true
+		}
+	}
+	for _, red := range ev.Redirects {
+		if red.Source == Name || exported[patternKey(red.From)] {
 			continue
 		}
 		if r, ok := p.covers(red.From); ok {
-			ev.Warn(red.From, "redirects-not-exported", fmt.Sprintf("%s (%s) covers the redirect from %s of %s: the server answers it by the rule, a static host by %s's own redirect", r.From, r.source, red.From, red.Source, red.Source))
+			ev.Warn(red.From, "redirects-overlap", fmt.Sprintf("%s (%s) covers the redirect from %s of %s: the server answers it by the rule, a static host by %s's own redirect", r.From, r.source, red.From, red.Source, red.Source))
 		}
 	}
 	return nil
+}
+
+// patternKey is a redirect's From as collage's router compares two: no
+// trailing "/" but at the root, and each placeholder's name erased — "{}" for
+// one, "{...}" for a catch-all, the text around one kept — so "/old" and
+// "/old/", and "/blog/{slug}" and "/blog/{x}", are one.
+func patternKey(from string) string {
+	trimmed := strings.Trim(from, "/")
+	if trimmed == "" {
+		return "/"
+	}
+	segments := strings.Split(trimmed, "/")
+	for i, seg := range segments {
+		open := strings.IndexByte(seg, '{')
+		end := strings.LastIndexByte(seg, '}')
+		if open < 0 || end < open {
+			continue
+		}
+		erased := "{}"
+		if strings.HasSuffix(seg[open:end], "...") {
+			erased = "{...}"
+		}
+		segments[i] = seg[:open] + erased + seg[end+1:]
+	}
+	return "/" + strings.Join(segments, "/")
 }
 
 func (p *Plugin) middleware(next http.Handler) http.Handler {

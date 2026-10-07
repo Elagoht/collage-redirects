@@ -502,18 +502,58 @@ func TestBuildFindings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	for path, text := range map[string]string{
-		"/a{b}":     "Rules[0]",
-		"/blog/old": "/blog/*",
+	for _, want := range []struct{ rule, path, text string }{
+		{"redirects-not-exported", "/a{b}", "Rules[0]"},
+		{"redirects-overlap", "/blog/old", "/blog/*"},
 	} {
 		found := slices.ContainsFunc(report.Findings, func(f collage.Finding) bool {
-			return f.Rule == "redirects-not-exported" && f.Level == collage.FindingWarning && f.Path == path && strings.Contains(f.Message, text)
+			return f.Rule == want.rule && f.Level == collage.FindingWarning && f.Path == want.path && strings.Contains(f.Message, want.text)
 		})
 		if !found {
-			t.Errorf("no redirects-not-exported warning at %s naming %q: %+v", path, text, report.Findings)
+			t.Errorf("no %s warning at %s naming %q: %+v", want.rule, want.path, want.text, report.Findings)
 		}
 	}
 	if !strings.Contains(log.String(), "a rule covers a page's redirect") || !strings.Contains(log.String(), "/blog/old") {
 		t.Errorf("no startup warning for the covered redirect:\n%s", log.String())
+	}
+}
+
+// A page's redirect and a rule from one path are one redirect to the router:
+// the build fails with collage.ErrDuplicateRedirect, which says so, and the
+// plugin does not report the pair a second time as an overlap.
+func TestBuildLeavesADuplicateToTheCore(t *testing.T) {
+	for _, c := range []struct{ rule, page string }{
+		{"/old", "/old/"},
+		{"/blog/*", "/blog/{path...}"},
+	} {
+		a, err := collage.New(&collage.Config{
+			Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+			Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
+			Plugins: []collage.Plugin{redirects.New(redirects.Options{Rules: []redirects.Rule{
+				{From: c.rule, To: "/elsewhere"},
+			}})},
+			Logger: slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		page := collage.NewPage("about").WithContent(collage.NewFragment("about", "p.html").Build()).
+			WithPath("en", "/about").WithPermanentRedirect(c.page, "/about").Build()
+		if err := a.RegisterPage(page); err != nil {
+			t.Fatal(err)
+		}
+		b, err := collage.NewBuilder(a, collage.BuildOptions{OutDir: t.TempDir()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, err := b.Build(context.Background())
+		if !errors.Is(err, collage.ErrDuplicateRedirect) {
+			t.Fatalf("%s beside %s: Build = %v, want ErrDuplicateRedirect", c.rule, c.page, err)
+		}
+		for _, f := range report.Findings {
+			if f.Plugin == redirects.Name {
+				t.Errorf("%s beside %s: the plugin reported the duplicate again: %+v", c.rule, c.page, f)
+			}
+		}
 	}
 }
