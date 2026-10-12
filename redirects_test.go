@@ -154,11 +154,7 @@ func TestNoRedirectsDocument(t *testing.T) {
 		t.Errorf("a document is registered: %q", doc.Name)
 	}
 	out := t.TempDir()
-	b, err := collage.NewBuilder(app(t, withFile(file), nil, nil), collage.BuildOptions{OutDir: out})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.Build(context.Background()); err != nil {
+	if _, err := collage.Build(context.Background(), app(t, withFile(file), nil, nil), collage.BuildOptions{OutDir: out}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(out, "_redirects")); !errors.Is(err, fs.ErrNotExist) {
@@ -313,11 +309,7 @@ func TestBuildCarriesTheRules(t *testing.T) {
 	if err := a.RegisterPage(collage.NewPage("about").WithContent(collage.NewFragment("about", "p.html").Build()).WithPath("en", "/about").Build()); err != nil {
 		t.Fatal(err)
 	}
-	b, err := collage.NewBuilder(a, collage.BuildOptions{OutDir: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.Build(context.Background()); err != nil {
+	if _, err := collage.Build(context.Background(), a, collage.BuildOptions{OutDir: t.TempDir()}); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
 	want := make([]collage.BuiltRedirect, len(fileRules))
@@ -334,11 +326,7 @@ func TestBuildCarriesTheRules(t *testing.T) {
 // redirect over a written file always does; the server is unaffected.
 func TestRootPrefixFailsTheBuild(t *testing.T) {
 	a := app(t, redirects.Options{Rules: []redirects.Rule{{From: "/*", To: "https://new.example/:splat"}}}, nil, nil)
-	b, err := collage.NewBuilder(a, collage.BuildOptions{OutDir: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.Build(context.Background()); !errors.Is(err, collage.ErrRedirectShadowsFile) {
+	if _, err := collage.Build(context.Background(), a, collage.BuildOptions{OutDir: t.TempDir()}); !errors.Is(err, collage.ErrRedirectShadowsFile) {
 		t.Errorf("Build = %v, want ErrRedirectShadowsFile", err)
 	}
 }
@@ -494,11 +482,7 @@ func TestBuildFindings(t *testing.T) {
 	if err := a.RegisterPage(page); err != nil {
 		t.Fatal(err)
 	}
-	b, err := collage.NewBuilder(a, collage.BuildOptions{OutDir: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	report, err := b.Build(context.Background())
+	report, err := collage.Build(context.Background(), a, collage.BuildOptions{OutDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -542,11 +526,7 @@ func TestBuildLeavesADuplicateToTheCore(t *testing.T) {
 		if err := a.RegisterPage(page); err != nil {
 			t.Fatal(err)
 		}
-		b, err := collage.NewBuilder(a, collage.BuildOptions{OutDir: t.TempDir()})
-		if err != nil {
-			t.Fatal(err)
-		}
-		report, err := b.Build(context.Background())
+		report, err := collage.Build(context.Background(), a, collage.BuildOptions{OutDir: t.TempDir()})
 		if !errors.Is(err, collage.ErrDuplicateRedirect) {
 			t.Fatalf("%s beside %s: Build = %v, want ErrDuplicateRedirect", c.rule, c.page, err)
 		}
