@@ -14,7 +14,7 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.61.0 or later.
+Requires collage v0.61.4 or later.
 
 ## The file
 
@@ -155,7 +155,7 @@ replaces the list given in Go, as decoding JSON into a slice does.
 
 ## Changed in v0.2.3
 
-- Requires collage v0.61.2. No behaviour changes; no key or API is renamed.
+- Requires collage v0.61.4. No behaviour changes; no key or API is renamed.
 
 ## Changed in v0.2.2
 
