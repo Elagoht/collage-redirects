@@ -153,20 +153,22 @@ replaces the list given in Go, as decoding JSON into a slice does.
 - What each host can carry — 410, 307 and 308, rule limits, query strings — is
   elagoht/deploy's to report, as warnings in the build's findings.
 
-## Changes
+## Changed in v0.2.3
 
-### v0.2.2
+- Requires collage v0.61.2. No behaviour changes; no key or API is renamed.
+
+## Changed in v0.2.2
 
 - `file`'s documentation says what the code does: `redirects.txt` is its default
   only when `FS` is set. No behaviour changes; no key or API is renamed.
 - Requires collage v0.61.0, whose plugin configuration refuses unknown keys.
 
-### v0.2.1
+## Changed in v0.2.1
 
 - Built against collage v0.60.0, whose public API is sealed; no behaviour changes.
 - Requires collage v0.60.0.
 
-### v0.2.0
+## Changed in v0.2.0
 
 - Breaking: the plugin no longer serves or writes `/_redirects`. It is a collage
   `RedirectSource`, and a static build hands its rules to a deploy plugin such as
@@ -182,21 +184,21 @@ replaces the list given in Go, as decoding JSON into a slice does.
   exported from, which fails the build with `collage.ErrDuplicateRedirect`.
 - Requires collage v0.52.0.
 
-### v0.1.6
+## Changed in v0.1.6
 
 - Retracts v0.1.4, tagged by mistake on the previous release's code. Use v0.1.5 or later. Nothing else changes.
 
-### v0.1.5
+## Changed in v0.1.5
 
 - Requires collage v0.50.0. Plugin configuration is read with `collage.PluginConfig`, since `host.Config` is gone. Nothing else changes.
 
-### v0.1.2
+## Changed in v0.1.2
 
 - `collage.json`: the plugin described to editors — its template functions,
   snippets and configuration schema — for the Collage Snippets & Highlighter
   extension and any tool reading it.
 
-### v0.1.1
+## Changed in v0.1.1
 
 - A gone page is answered with the site's own not-found page, status 410, through
   collage v0.24.0's `Host.ServeStatus`, rather than a line of text.

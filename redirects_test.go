@@ -3,7 +3,6 @@ package redirects_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io/fs"
 	"log/slog"
@@ -18,6 +17,7 @@ import (
 
 	redirects "github.com/Elagoht/collage-redirects"
 	"github.com/Elagoht/collage/pkg/collage"
+	"github.com/Elagoht/collage/pkg/collagetest"
 )
 
 const file = `# the old blog
@@ -30,19 +30,48 @@ const file = `# the old blog
 /docs/*          https://docs.example/:splat 307
 `
 
-func app(t *testing.T, opts redirects.Options, config map[string]json.RawMessage, log *bytes.Buffer) *collage.App {
+// siteOptions is the application the tests run the plugin in: the plugin with
+// opts, config as its plugins-config.json section when not empty, and the pages
+// "about" and "sale" beside collagetest's home page at /.
+func siteOptions(opts redirects.Options, config string, extra ...collagetest.SiteOption) []collagetest.SiteOption {
+	options := []collagetest.SiteOption{
+		collagetest.WithPlugins(redirects.New(opts)),
+		collagetest.WithTemplates(map[string]string{"p.html": `<p>page</p>`}),
+		collagetest.WithRegister(page("about", "/about"), page("sale", "/sale")),
+	}
+	if config != "" {
+		options = append(options, collagetest.WithPluginConfig(redirects.Name, config))
+	}
+	return append(options, extra...)
+}
+
+func page(name, path string) *collage.Page {
+	return collage.NewPage(name).WithContent(collage.NewFragment(name, "p.html").Build()).WithPath("en", path).Build()
+}
+
+// site is the started application.
+func site(t *testing.T, opts redirects.Options, config string) *collagetest.Site {
 	t.Helper()
-	cfg := &collage.Config{
-		Server:       collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template:     collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
-		Plugins:      []collage.Plugin{redirects.New(opts)},
-		PluginConfig: config,
-	}
-	if log == nil {
-		log = new(bytes.Buffer)
-	}
-	cfg.Logger = slog.New(slog.NewTextHandler(log, nil))
-	a, err := collage.New(cfg)
+	return collagetest.NewSite(t, siteOptions(opts, config)...)
+}
+
+// startErr is what starting the application returns.
+func startErr(t *testing.T, opts redirects.Options, config string) error {
+	t.Helper()
+	_, err := collagetest.TrySite(t, siteOptions(opts, config)...)
+	return err
+}
+
+// unstarted is the same application built by hand and not started, for a test
+// that serves it after Start failed: TrySite returns no application then.
+func unstarted(t *testing.T, opts redirects.Options) *collage.App {
+	t.Helper()
+	a, err := collage.New(&collage.Config{
+		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
+		Plugins:  []collage.Plugin{redirects.New(opts)},
+		Logger:   slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +80,7 @@ func app(t *testing.T, opts redirects.Options, config map[string]json.RawMessage
 		if name == "home" {
 			path = "/"
 		}
-		if err := a.RegisterPage(collage.NewPage(name).WithContent(collage.NewFragment(name, "p.html").Build()).WithPath("en", path).Build()); err != nil {
+		if err := a.RegisterPage(page(name, path)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -69,7 +98,7 @@ func get(h http.Handler, method, target string) *httptest.ResponseRecorder {
 }
 
 func TestRedirects(t *testing.T) {
-	h := app(t, withFile(file), nil, nil).Handler()
+	h := site(t, withFile(file), "").App.Handler()
 	for _, c := range []struct {
 		method, from string
 		status       int
@@ -113,22 +142,13 @@ func TestRedirects(t *testing.T) {
 // A gone page is answered with the site's own not-found page, status 410, not a
 // line of text.
 func TestGoneServesNotFoundPage(t *testing.T) {
-	cfg := &collage.Config{
-		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{
-			"t/p.html":       {Data: []byte(`<p>page</p>`)},
-			"t/missing.html": {Data: []byte(`<h1>Nothing here</h1>`)},
-		}, Root: "t"},
-		Plugins: []collage.Plugin{redirects.New(withFile(file))},
-		Logger:  slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
-	}
-	a, err := collage.New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := a.RegisterNotFoundPage(collage.NewPage("missing").WithContent(collage.NewFragment("missing", "missing.html").Build()).Build()); err != nil {
-		t.Fatal(err)
-	}
+	a := collagetest.NewSite(t,
+		collagetest.WithPlugins(redirects.New(withFile(file))),
+		collagetest.WithTemplates(map[string]string{"missing.html": `<h1>Nothing here</h1>`}),
+		collagetest.WithSetup(func(app *collage.App) error {
+			return app.RegisterNotFoundPage(collage.NewPage("missing").WithContent(collage.NewFragment("missing", "missing.html").Build()).Build())
+		}),
+	).App
 	rec := get(a.Handler(), http.MethodGet, "/old-product")
 	if rec.Code != http.StatusGone || !strings.Contains(rec.Body.String(), "<h1>Nothing here</h1>") {
 		t.Errorf("/old-product = %d %q, want 410 with the not-found page", rec.Code, rec.Body.String())
@@ -143,10 +163,7 @@ func TestGoneServesNotFoundPage(t *testing.T) {
 // nothing, no document is registered, and a build with no deploy plugin writes
 // no _redirects file.
 func TestNoRedirectsDocument(t *testing.T) {
-	a := app(t, withFile(file), nil, nil)
-	if err := a.Start(); err != nil {
-		t.Fatal(err)
-	}
+	a := site(t, withFile(file), "").App
 	if code := get(a.Handler(), http.MethodGet, "/_redirects").Code; code != http.StatusNotFound {
 		t.Errorf("/_redirects = %d, want 404", code)
 	}
@@ -154,7 +171,7 @@ func TestNoRedirectsDocument(t *testing.T) {
 		t.Errorf("a document is registered: %q", doc.Name)
 	}
 	out := t.TempDir()
-	if _, err := collage.Build(context.Background(), app(t, withFile(file), nil, nil), collage.BuildOptions{OutDir: out}); err != nil {
+	if _, err := collage.Build(context.Background(), site(t, withFile(file), "").App, collage.BuildOptions{OutDir: out}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(out, "_redirects")); !errors.Is(err, fs.ErrNotExist) {
@@ -176,31 +193,19 @@ var fileRules = []collage.BuiltRedirect{
 	{From: "/docs/{rest...}", To: "https://docs.example/{rest}", Status: 307},
 }
 
-func started(t *testing.T, opts redirects.Options, log *bytes.Buffer) *redirects.Plugin {
+// started is the plugin, with opts, in a started application with no pages, and
+// what that application logged.
+func started(t *testing.T, opts redirects.Options) (*redirects.Plugin, *collagetest.Logs) {
 	t.Helper()
 	p := redirects.New(opts)
-	cfg := &collage.Config{
-		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
-		Plugins:  []collage.Plugin{p},
-	}
-	if log == nil {
-		log = new(bytes.Buffer)
-	}
-	cfg.Logger = slog.New(slog.NewTextHandler(log, nil))
-	a, err := collage.New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := a.Start(); err != nil {
-		t.Fatal(err)
-	}
-	return p
+	site := collagetest.NewSite(t, collagetest.WithPlugins(p), collagetest.WithoutHome())
+	return p, site.Logs
 }
 
 func TestRedirectSource(t *testing.T) {
 	var _ collage.RedirectSource = redirects.New(redirects.Options{})
-	got := started(t, withFile(file), nil).Redirects()
+	p, _ := started(t, withFile(file))
+	got := p.Redirects()
 	if !slices.Equal(got, fileRules) {
 		t.Errorf("Redirects() =\n%+v\nwant\n%+v", got, fileRules)
 	}
@@ -240,7 +245,8 @@ func TestRedirectsMapping(t *testing.T) {
 		{"prefix after its own path, slashed", []redirects.Rule{{From: "/x/", To: "/a"}, {From: "/x/*", To: "/b"}},
 			[]collage.BuiltRedirect{{From: "/x/", To: "/a", Status: 301}, {From: "/x/{rest...}", To: "/b", Status: 301}}},
 	} {
-		got := started(t, redirects.Options{Rules: c.rules}, nil).Redirects()
+		p, _ := started(t, redirects.Options{Rules: c.rules})
+		got := p.Redirects()
 		if !slices.Equal(got, c.want) {
 			t.Errorf("%s: Redirects() =\n%+v\nwant\n%+v", c.name, got, c.want)
 		}
@@ -263,9 +269,9 @@ func TestRedirectsLeaveOutWhatTheRouterCannotSay(t *testing.T) {
 		{redirects.Rule{From: "/a//*", To: "/c"}, "empty segment"},
 		{redirects.Rule{From: "/x/*", To: "https://:splat@e.example/"}, "host"},
 	} {
-		var log bytes.Buffer
 		opts := redirects.Options{Rules: []redirects.Rule{c.rule, {From: "/kept", To: "/k"}}}
-		got := started(t, opts, &log).Redirects()
+		p, log := started(t, opts)
+		got := p.Redirects()
 		want := []collage.BuiltRedirect{{From: "/kept", To: "/k", Status: 301}}
 		if !slices.Equal(got, want) {
 			t.Errorf("%+v: Redirects() = %+v, want only /kept", c.rule, got)
@@ -275,7 +281,7 @@ func TestRedirectsLeaveOutWhatTheRouterCannotSay(t *testing.T) {
 		}
 	}
 	// Still served.
-	h := app(t, redirects.Options{Rules: []redirects.Rule{{From: "/a{b}", To: "/c"}}}, nil, nil).Handler()
+	h := site(t, redirects.Options{Rules: []redirects.Rule{{From: "/a{b}", To: "/c"}}}, "").App.Handler()
 	if rec := get(h, http.MethodGet, "/a%7Bb%7D"); rec.Code != 301 || rec.Header().Get("Location") != "/c" {
 		t.Errorf("/a{b} = %d %q, want 301 /c", rec.Code, rec.Header().Get("Location"))
 	}
@@ -297,18 +303,12 @@ func (c *capture) OnBuildFinished(_ context.Context, ev *collage.BuildFinishedEv
 // the hook sees the rules stamped with the plugin's name.
 func TestBuildCarriesTheRules(t *testing.T) {
 	c := &capture{}
-	a, err := collage.New(&collage.Config{
-		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
-		Plugins:  []collage.Plugin{redirects.New(withFile(file)), c},
-		Logger:   slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := a.RegisterPage(collage.NewPage("about").WithContent(collage.NewFragment("about", "p.html").Build()).WithPath("en", "/about").Build()); err != nil {
-		t.Fatal(err)
-	}
+	a := collagetest.NewSite(t,
+		collagetest.WithPlugins(redirects.New(withFile(file)), c),
+		collagetest.WithTemplates(map[string]string{"p.html": `<p>page</p>`}),
+		collagetest.WithoutHome(),
+		collagetest.WithRegister(page("about", "/about")),
+	).App
 	if _, err := collage.Build(context.Background(), a, collage.BuildOptions{OutDir: t.TempDir()}); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestBuildCarriesTheRules(t *testing.T) {
 // A root prefix takes every path, so a build that writes any file fails, as a
 // redirect over a written file always does; the server is unaffected.
 func TestRootPrefixFailsTheBuild(t *testing.T) {
-	a := app(t, redirects.Options{Rules: []redirects.Rule{{From: "/*", To: "https://new.example/:splat"}}}, nil, nil)
+	a := site(t, redirects.Options{Rules: []redirects.Rule{{From: "/*", To: "https://new.example/:splat"}}}, "").App
 	if _, err := collage.Build(context.Background(), a, collage.BuildOptions{OutDir: t.TempDir()}); !errors.Is(err, collage.ErrRedirectShadowsFile) {
 		t.Errorf("Build = %v, want ErrRedirectShadowsFile", err)
 	}
@@ -346,8 +346,7 @@ func TestControlCharacters(t *testing.T) {
 		{From: "/a", To: "https://e.example/\u2029"},
 		{From: "/x/*", To: "/b\n:splat"},
 	} {
-		a := app(t, redirects.Options{Rules: []redirects.Rule{r}}, nil, nil)
-		if err := a.Start(); !errors.Is(err, redirects.ErrInvalidRule) || !strings.Contains(err.Error(), "control character") {
+		if err := startErr(t, redirects.Options{Rules: []redirects.Rule{r}}, ""); !errors.Is(err, redirects.ErrInvalidRule) || !strings.Contains(err.Error(), "control character") {
 			t.Errorf("%q -> %q: Start = %v, want ErrInvalidRule for a control character", r.From, r.To, err)
 		}
 	}
@@ -357,21 +356,20 @@ func TestControlCharacters(t *testing.T) {
 		`{"rules":[{"from":"/a","to":"/b\u0000"}]}`,
 		`{"rules":[{"from":"/a\u2028","to":"/b"}]}`,
 	} {
-		config := map[string]json.RawMessage{redirects.Name: json.RawMessage(raw)}
-		if err := app(t, redirects.Options{}, config, nil).Start(); !errors.Is(err, redirects.ErrInvalidRule) || !strings.Contains(err.Error(), "control character") {
+		if err := startErr(t, redirects.Options{}, raw); !errors.Is(err, redirects.ErrInvalidRule) || !strings.Contains(err.Error(), "control character") {
 			t.Errorf("%s: Start = %v, want ErrInvalidRule for a control character", raw, err)
 		}
 	}
-	if err := app(t, withFile("/a\x01 /b\n"), nil, nil).Start(); !errors.Is(err, redirects.ErrInvalidRule) || !strings.Contains(err.Error(), "control character") {
+	if err := startErr(t, withFile("/a\x01 /b\n"), ""); !errors.Is(err, redirects.ErrInvalidRule) || !strings.Contains(err.Error(), "control character") {
 		t.Errorf("a file with a control character: Start = %v", err)
 	}
 	// U+2028 is a space to the file's reader: it separates fields, and never
 	// reaches a rule.
-	p := started(t, withFile("/a /b\u2028302\n"), nil)
+	p, _ := started(t, withFile("/a /b\u2028302\n"))
 	if got, want := p.Redirects(), []collage.BuiltRedirect{{From: "/a", To: "/b", Status: 302}}; !slices.Equal(got, want) {
 		t.Errorf("U+2028 file: Redirects() = %+v, want %+v", got, want)
 	}
-	h := app(t, withFile("/a /b 302\r\n/c /d\r\n"), nil, nil).Handler()
+	h := site(t, withFile("/a /b 302\r\n/c /d\r\n"), "").App.Handler()
 	if rec := get(h, http.MethodGet, "/a"); rec.Code != 302 || rec.Header().Get("Location") != "/b" {
 		t.Errorf("CRLF file: /a = %d %q", rec.Code, rec.Header().Get("Location"))
 	}
@@ -381,8 +379,8 @@ func TestControlCharacters(t *testing.T) {
 func TestRulesAndConfiguration(t *testing.T) {
 	opts := withFile("/a /b\n")
 	opts.Rules = []redirects.Rule{{From: "/c", To: "/d", Status: 302}}
-	config := map[string]json.RawMessage{redirects.Name: json.RawMessage(`{"rules":[{"from":"/e","to":"/f"}]}`)}
-	h := app(t, opts, config, nil).Handler()
+	config := `{"rules":[{"from":"/e","to":"/f"}]}`
+	h := site(t, opts, config).App.Handler()
 	// Configuration replaces the list given in Go, as JSON decoding a slice does.
 	for from, want := range map[string]string{"/a": "/b", "/e": "/f"} {
 		if loc := get(h, http.MethodGet, from).Header().Get("Location"); loc != want {
@@ -396,8 +394,8 @@ func TestRulesAndConfiguration(t *testing.T) {
 	if err := os.WriteFile(path, []byte("/g /h 307\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	config = map[string]json.RawMessage{redirects.Name: json.RawMessage(`{"file":` + strings.ReplaceAll(`"`+path+`"`, `\`, `\\`) + `}`)}
-	if rec := get(app(t, redirects.Options{}, config, nil).Handler(), http.MethodGet, "/g"); rec.Code != 307 || rec.Header().Get("Location") != "/h" {
+	config = `{"file":` + strings.ReplaceAll(`"`+path+`"`, `\`, `\\`) + `}`
+	if rec := get(site(t, redirects.Options{}, config).App.Handler(), http.MethodGet, "/g"); rec.Code != 307 || rec.Header().Get("Location") != "/h" {
 		t.Errorf("/g = %d %q", rec.Code, rec.Header().Get("Location"))
 	}
 }
@@ -425,7 +423,7 @@ func TestRefusals(t *testing.T) {
 		"/x/* /x/y/:splat\n":       "circle",
 		"/a /b\n/b /c\n/c /a\n":    "circle",
 	} {
-		a := app(t, withFile(body), nil, nil)
+		a := unstarted(t, withFile(body))
 		err := a.Start()
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: Start = %v, want an error containing %q", body, err, want)
@@ -434,26 +432,21 @@ func TestRefusals(t *testing.T) {
 			t.Errorf("%q: %d, want 503", body, code)
 		}
 	}
-	a := app(t, redirects.Options{Rules: []redirects.Rule{{From: "/a", To: "/b", Status: 404}}}, nil, nil)
-	if err := a.Start(); !errors.Is(err, redirects.ErrInvalidRule) || !strings.Contains(err.Error(), "Rules[0]") {
+	if err := startErr(t, redirects.Options{Rules: []redirects.Rule{{From: "/a", To: "/b", Status: 404}}}, ""); !errors.Is(err, redirects.ErrInvalidRule) || !strings.Contains(err.Error(), "Rules[0]") {
 		t.Errorf("Start = %v", err)
 	}
-	if err := app(t, redirects.Options{FS: fstest.MapFS{}}, nil, nil).Start(); err == nil {
+	if err := startErr(t, redirects.Options{FS: fstest.MapFS{}}, ""); err == nil {
 		t.Error("a missing file started the application")
 	}
 	// A chain is not a circle.
-	if err := app(t, withFile("/a /b\n/b /c\n"), nil, nil).Start(); err != nil {
+	if err := startErr(t, withFile("/a /b\n/b /c\n"), ""); err != nil {
 		t.Errorf("a chain was refused: %v", err)
 	}
 }
 
 // A rule over a page's path is allowed, and warned about.
 func TestShadowedPageWarns(t *testing.T) {
-	var log bytes.Buffer
-	a := app(t, withFile("/about /about-us\n"), nil, &log)
-	if err := a.Start(); err != nil {
-		t.Fatal(err)
-	}
+	log := site(t, withFile("/about /about-us\n"), "").Logs
 	if !strings.Contains(log.String(), "a rule hides a page") || !strings.Contains(log.String(), "page=about") {
 		t.Errorf("no warning:\n%s", log.String())
 	}
@@ -464,24 +457,18 @@ var _ collage.BuildFinishedHook = redirects.New(redirects.Options{})
 // A rule the build leaves out, and a plugin rule covering a page's own redirect,
 // are warnings in the build's findings as well as at startup.
 func TestBuildFindings(t *testing.T) {
-	var log bytes.Buffer
-	a, err := collage.New(&collage.Config{
-		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
-		Plugins: []collage.Plugin{redirects.New(redirects.Options{Rules: []redirects.Rule{
+	about := collage.NewPage("about").WithContent(collage.NewFragment("about", "p.html").Build()).
+		WithPath("en", "/about").WithPermanentRedirect("/blog/old", "/about").Build()
+	s := collagetest.NewSite(t,
+		collagetest.WithPlugins(redirects.New(redirects.Options{Rules: []redirects.Rule{
 			{From: "/a{b}", To: "/c"},
 			{From: "/blog/*", To: "/posts/:splat"},
-		}})},
-		Logger: slog.New(slog.NewTextHandler(&log, nil)),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	page := collage.NewPage("about").WithContent(collage.NewFragment("about", "p.html").Build()).
-		WithPath("en", "/about").WithPermanentRedirect("/blog/old", "/about").Build()
-	if err := a.RegisterPage(page); err != nil {
-		t.Fatal(err)
-	}
+		}})),
+		collagetest.WithTemplates(map[string]string{"p.html": `<p>page</p>`}),
+		collagetest.WithoutHome(),
+		collagetest.WithRegister(about),
+	)
+	a, log := s.App, s.Logs
 	report, err := collage.Build(context.Background(), a, collage.BuildOptions{OutDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
