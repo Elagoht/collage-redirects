@@ -14,7 +14,7 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.60.0 or later.
+Requires collage v0.61.0 or later.
 
 ## The file
 
@@ -154,6 +154,12 @@ replaces the list given in Go, as decoding JSON into a slice does.
   elagoht/deploy's to report, as warnings in the build's findings.
 
 ## Changes
+
+### v0.2.2
+
+- `file`'s documentation says what the code does: `redirects.txt` is its default
+  only when `FS` is set. No behaviour changes; no key or API is renamed.
+- Requires collage v0.61.0, whose plugin configuration refuses unknown keys.
 
 ### v0.2.1
 

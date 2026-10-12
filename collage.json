@@ -3,13 +3,14 @@
   "name": "elagoht/redirects",
   "description": "A collage plugin for redirects kept in a file rather than in code: what a site migration leaves behind, hundreds of old addresses and where each one went.",
   "repository": "https://github.com/Elagoht/collage-redirects",
+  "setup": "With no options it reads no file and has no rules: list them under `\"rules\"` in this plugin's section of `plugins-config.json`, name a file with `\"file\"` (read from the working directory), or pass an `FS` holding `redirects.txt` from Go.",
   "config": {
     "type": "object",
     "description": "A collage plugin for redirects kept in a file rather than in code: what a site migration leaves behind, hundreds of old addresses and where each one went.",
     "properties": {
       "file": {
         "type": "string",
-        "description": "File is the redirects file's name. Default \"redirects.txt\"."
+        "description": "File is the redirects file's name. With FS set it defaults to \"redirects.txt\"; without FS no file is read unless File is set, and then it is read from the working directory."
       },
       "rules": {
         "type": "array",

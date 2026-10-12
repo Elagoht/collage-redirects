@@ -51,7 +51,9 @@ type Options struct {
 	// then an error. Unset, File is read from the working directory when it is
 	// set, and no file is read when it is not.
 	FS fs.FS `json:"-"`
-	// File is the redirects file's name. Default "redirects.txt".
+	// File is the redirects file's name. With FS set it defaults to
+	// "redirects.txt"; without FS no file is read unless File is set, and then it
+	// is read from the working directory.
 	File string `json:"file"`
 	// Rules are redirects given in Go or configuration, checked after the file's.
 	Rules []Rule `json:"rules"`
@@ -99,7 +101,7 @@ var (
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.2.1" }
+func (p *Plugin) Version() string                { return "0.2.2" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 // Init reads the rules, refuses any that are wrong, warns of any that hide a page,
